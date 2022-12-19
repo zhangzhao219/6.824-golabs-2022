@@ -26,6 +26,14 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type TaskInformation struct {
+	Id             int    // 任务id
+	TaskType       string // 任务类型
+	InputFileName  string // 输入文件名称
+	OutputFileName string // 输出文件名称
+	NReduce        int    // Reduce数量
+}
+
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
 // Can't use the current directory since
