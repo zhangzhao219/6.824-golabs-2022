@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
+	"sync"
 )
 
 type Coordinator struct {
@@ -30,6 +31,8 @@ type ReduceTaskInformation struct {
 	OutputFileName string // Reduce任务完成后的最终文件名称
 }
 
+var mu sync.Mutex
+
 // Your code here -- RPC handlers for the worker to call.
 
 // 分配任务
@@ -44,7 +47,9 @@ func (c *Coordinator) AsssignTask(args *TaskInformation, reply *TaskInformation)
 			reply.InputFileName = mapTask.OriginFileName
 			reply.OutputFileName = mapTask.IntermediateFileName
 			reply.NReduce = mapTask.NReduce
+			mu.Lock()
 			c.MapTask[i].State = 1
+			mu.Unlock()
 			return nil
 		} else if mapTask.State == 1 {
 			isMapfinished = false
@@ -52,11 +57,19 @@ func (c *Coordinator) AsssignTask(args *TaskInformation, reply *TaskInformation)
 	}
 	// 如果所有的Map任务都完成了，就遍历Reduce任务
 	if isMapfinished {
-		for _, reduceTask := range c.ReduceTask {
+		for i, reduceTask := range c.ReduceTask {
 			if reduceTask.State == 0 {
+				reply.Id = reduceTask.Id
+				reply.TaskType = "reduce"
+				reply.InputFileName = reduceTask.OriginFileName
+				reply.OutputFileName = reduceTask.OutputFileName
+				mu.Lock()
+				c.ReduceTask[i].State = 1
+				mu.Unlock()
 				return nil
 			}
 		}
+
 	}
 	return nil
 }
@@ -64,18 +77,14 @@ func (c *Coordinator) AsssignTask(args *TaskInformation, reply *TaskInformation)
 // 接收任务已经完成的信息
 func (c *Coordinator) TaskFinish(args *TaskInformation, reply *TaskInformation) error {
 	if args.TaskType == "map" {
+		mu.Lock()
 		c.MapTask[args.Id-1].State = 2
+		mu.Unlock()
 	} else if args.TaskType == "reduce" {
+		mu.Lock()
 		c.ReduceTask[args.Id-1].State = 2
+		mu.Unlock()
 	}
-	return nil
-}
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
 	return nil
 }
 
@@ -96,10 +105,16 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
-
+	ret := true
+	mu.Lock()
 	// Your code here.
-
+	for _, v := range c.ReduceTask {
+		if v.State != 2 {
+			ret = false
+			break
+		}
+	}
+	mu.Unlock()
 	return ret
 }
 
@@ -126,8 +141,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		reduceTaskSlice = append(reduceTaskSlice, ReduceTaskInformation{
 			Id:             i + 1,
 			State:          0,
-			OriginFileName: "mr-0-" + strconv.Itoa(i+1),
-			OutputFileName: "mr-" + strconv.Itoa(i+1),
+			OriginFileName: "mr-*-" + strconv.Itoa(i+1),
+			OutputFileName: "mr-out-" + strconv.Itoa(i+1),
 		})
 	}
 
