@@ -1,94 +1,205 @@
 package mr
 
 import (
+	"container/list"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 )
 
+// Coordinator存储的主要信息，包括Map和Reduce两部分任务的信息以及工作节点的信息
 type Coordinator struct {
-	// Your definitions here.
-	MapTask    []MapTaskInformation    // Map任务列表
-	ReduceTask []ReduceTaskInformation // Reduce任务列表
+	UniqueIdSlice     []*list.Element // 通过任务Id找到任务信息的切片，相当于一个Map
+	MapTaskNum        int             // map任务总数量
+	ReduceTaskNum     int             // reduce任务总数量
+	WorkerNum         int             // 目前正在工作的节点数量
+	MapTask                           // Map任务信息链表
+	ReduceTask                        // Reduce任务信息链表
+	WorkerInformation                 // Worker的信息
 }
 
+// 存储Worker的信息
+type WorkerInformation struct {
+}
+
+// Map任务信息链表，包括三个链表，分别表示未开始、正在进行和已经完成的任务
+type MapTask struct {
+	MapListReady    *list.List // 未开始的Map任务
+	MapListRunning  *list.List // 正在进行的Map任务
+	MapListComplete *list.List // 已经完成的Map任务
+}
+
+// Reduce任务信息链表，包括三个链表，分别表示未开始、正在进行和已经完成的任务
+type ReduceTask struct {
+	ReduceListReady    *list.List // 未开始的Reduce任务
+	ReduceListRunning  *list.List // 正在进行的Reduce任务
+	ReduceListComplete *list.List // 已经完成的Reduce任务
+}
+
+// Map任务具体信息
 type MapTaskInformation struct {
-	Id                   int    // 任务唯一编码
-	State                int    // 0表示未开始，1表示正在进行，2表示已经完成
-	NReduce              int    // 分成Reduce任务的数量
-	OriginFileName       string // 原始文件名称
-	IntermediateFileName string // Map任务完成后的文件名称（中间文件）
+	Id                   int      // 任务唯一编码
+	OriginFileName       string   // 原始文件名称
+	IntermediateFileName []string // Map任务完成后中间文件列表
 }
 
+// Reduce任务具体信息
 type ReduceTaskInformation struct {
-	Id             int    // 任务唯一编码
-	State          int    // 0表示未开始，1表示正在进行，2表示已经完成
-	OriginFileName string // Reduce的初始文件名称（中间文件）
-	OutputFileName string // Reduce任务完成后的最终文件名称
+	Id                   int      // 任务唯一编码
+	IntermediateFileName []string // Reduce的初始中间文件列表（从Map处获得）
+	OutputFileName       string   // Reduce任务完成后的最终文件名称
 }
 
+// 全局互斥锁
 var mu sync.Mutex
 
-// Your code here -- RPC handlers for the worker to call.
-
-// 分配任务
-func (c *Coordinator) AsssignTask(args *TaskInformation, reply *TaskInformation) error {
-	isMapfinished := true
-	//遍历所有的Map任务信息，将未开始的分配给这个节点
-	for i, mapTask := range c.MapTask {
-		if mapTask.State == 0 {
-			isMapfinished = false
-			reply.Id = mapTask.Id
-			reply.TaskType = "map"
-			reply.InputFileName = mapTask.OriginFileName
-			reply.OutputFileName = mapTask.IntermediateFileName
-			reply.NReduce = mapTask.NReduce
-			mu.Lock()
-			c.MapTask[i].State = 1
-			mu.Unlock()
-			return nil
-		} else if mapTask.State == 1 {
-			isMapfinished = false
-		}
+// Worker告知Coordinator自己上线了
+func (c *Coordinator) WorkerOnline(args *WorkerArgs, reply *WorkerReply) error {
+	mu.Lock()
+	if c.WorkerNum == -1 {
+		c.WorkerNum = 0
 	}
-	// 如果所有的Map任务都完成了，就遍历Reduce任务
-	if isMapfinished {
-		for i, reduceTask := range c.ReduceTask {
-			if reduceTask.State == 0 {
-				reply.Id = reduceTask.Id
-				reply.TaskType = "reduce"
-				reply.InputFileName = reduceTask.OriginFileName
-				reply.OutputFileName = reduceTask.OutputFileName
-				mu.Lock()
-				c.ReduceTask[i].State = 1
-				mu.Unlock()
-				return nil
+	c.WorkerNum += 1
+	mu.Unlock()
+	return nil
+}
+
+// Worker向Coordinator请求任务
+func (c *Coordinator) AsssignTask(args *WorkerArgs, reply *WorkerReply) error {
+
+	mu.Lock()
+
+	// 首先查看map任务是否已经全部完成，如果全部完成了就去完成Reduce任务，如果也全部完成了就发送Worker可以退出的消息
+	// 判断方式：通过完成链表的节点数量与初始化时侯计算的数量是否相同
+
+	if c.MapListComplete.Len() != c.MapTaskNum {
+
+		// 分配map任务
+
+		if c.MapListReady.Len() == 0 {
+
+			// 没有没开始的Map任务
+			reply.TaskType = "waiting"
+
+		} else {
+
+			// 将一个未完成的任务从未开始的链表中取出，插入到正在进行的链表里面
+			e := c.MapListReady.Front()
+			c.MapListReady.Remove(e)
+			c.MapListRunning.PushBack(e)
+
+			// 构建返回消息，告知Worker这个任务的信息
+			reply.TaskType = "map"
+			value := e.Value.(MapTaskInformation)
+			reply.Id = value.Id
+			reply.MapInput = value.OriginFileName
+			reply.MapOutput = value.IntermediateFileName
+		}
+	} else if c.ReduceListComplete.Len() != c.ReduceTaskNum {
+
+		// 分配reduce任务
+
+		if c.ReduceListReady.Len() == 0 {
+			// 没有没开始的Reduce任务
+			reply.TaskType = "waiting"
+
+		} else {
+
+			// 将一个未完成的任务从未开始的链表中取出，插入到正在进行的链表里面
+			e := c.ReduceListReady.Front()
+			c.ReduceListReady.Remove(e)
+			c.ReduceListRunning.PushBack(e)
+
+			// 构建返回消息，告知Worker这个任务的信息
+			reply.TaskType = "reduce"
+			value := e.Value.(ReduceTaskInformation)
+			reply.Id = value.Id
+			reply.ReduceInput = value.IntermediateFileName
+			reply.ReduceOutput = value.OutputFileName
+
+		}
+	} else {
+
+		//告知Worker已经没有任务了，可以退出了
+		reply.TaskType = "finish"
+	}
+
+	mu.Unlock()
+
+	return nil
+}
+
+// Worker告知Coordinator刚才分配的任务已经完成
+func (c *Coordinator) TaskFinish(args *WorkerArgs, reply *WorkerReply) error {
+
+	mu.Lock()
+
+	// 将节点从正在进行的链表中取出，插入到已经完成的链表中
+	if args.TaskType == "map" {
+
+		// 操作节点
+		e := c.UniqueIdSlice[args.Taskid]
+		c.MapListRunning.Remove(e)
+		c.MapListComplete.PushBack(e)
+
+		// 如果是Map任务，需要将产生的nReduce个中间文件分配给Reduce节点
+		for _, file := range e.Value.(MapTaskInformation).IntermediateFileName {
+
+			// 计算是哪个Reduce节点
+			reduceTaskNum, err := strconv.Atoi(strings.Split(file, "-")[2])
+			if err != nil {
+				log.Fatalf("cannot parseInt %v", file)
+			}
+
+			// 将产生的nReduce个中间文件分配给Reduce节点（需要重新构建节点）
+			value := c.UniqueIdSlice[reduceTaskNum].Value
+			tempSlice := append(value.(ReduceTaskInformation).IntermediateFileName, file)
+			c.UniqueIdSlice[reduceTaskNum].Value = ReduceTaskInformation{
+				Id:                   value.(ReduceTaskInformation).Id,
+				IntermediateFileName: tempSlice,
+				OutputFileName:       value.(ReduceTaskInformation).OutputFileName,
 			}
 		}
-
-	}
-	return nil
-}
-
-// 接收任务已经完成的信息
-func (c *Coordinator) TaskFinish(args *TaskInformation, reply *TaskInformation) error {
-	if args.TaskType == "map" {
-		mu.Lock()
-		c.MapTask[args.Id-1].State = 2
-		mu.Unlock()
 	} else if args.TaskType == "reduce" {
-		mu.Lock()
-		c.ReduceTask[args.Id-1].State = 2
-		mu.Unlock()
+
+		// 操作节点
+		e := c.ReduceListRunning.Remove(c.UniqueIdSlice[args.Taskid])
+		c.ReduceListComplete.PushBack(e)
 	}
+	mu.Unlock()
 	return nil
 }
 
-// start a thread that listens for RPCs from worker.go
+// Worker告知Coordinator自己退出了
+func (c *Coordinator) WorkerFinish(args *WorkerArgs, reply *WorkerReply) error {
+
+	mu.Lock()
+
+	// 退出时将Coordinator内部存储的Worker数量-1
+	c.WorkerNum -= 1
+
+	mu.Unlock()
+
+	return nil
+}
+
+// main/mrcoordinator.go每隔一秒调用Done()进行检查，如果返回true，认为全部的任务都已经完成，退出主程序
+func (c *Coordinator) Done() bool {
+	ret := false
+	mu.Lock()
+	if c.WorkerNum == 0 {
+		ret = true
+	}
+	mu.Unlock()
+	return ret
+}
+
+// 开启监听Worker的线程
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
@@ -102,57 +213,75 @@ func (c *Coordinator) server() {
 	go http.Serve(l, nil)
 }
 
-// main/mrcoordinator.go calls Done() periodically to find out
-// if the entire job has finished.
-func (c *Coordinator) Done() bool {
-	ret := true
-	mu.Lock()
-	// Your code here.
-	for _, v := range c.ReduceTask {
-		if v.State != 2 {
-			ret = false
-			break
-		}
-	}
-	mu.Unlock()
-	return ret
-}
-
-// create a Coordinator.
-// main/mrcoordinator.go calls this function.
-// nReduce is the number of reduce tasks to use.
+// 创建一个 Coordinator
+// 输入：输入文件名称和Reduce任务执行的节点数量
+// 输出：Coordinator指针
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
-	mapTaskSlice := []MapTaskInformation{}
+	// 全局唯一任务id，通过切片的方式存储，以下标作为索引
+	uniqueIdSlice := make([]*list.Element, 0)
+	uniqueId := 0
 
-	for id, fileName := range files {
-		mapTaskSlice = append(mapTaskSlice, MapTaskInformation{
-			Id:                   id + 1,
-			State:                0,
-			NReduce:              nReduce,
+	// map的三个双向链表
+	mapListReady := list.New()
+	mapListRunning := list.New()
+	mapListComplete := list.New()
+
+	// reduce的三个双向链表
+	reduceListReady := list.New()
+	reduceListRunning := list.New()
+	reduceListComplete := list.New()
+
+	// 遍历输入文件，构建Map结构体并插入到双向链表中
+	for _, fileName := range files {
+		// 构建输出文件名称
+		tempSlice := make([]string, 0)
+		for i := len(files); i < nReduce+len(files); i++ {
+			tempSlice = append(tempSlice, "mr-"+strconv.Itoa(uniqueId)+"-"+strconv.Itoa(i)+"-")
+		}
+		uniqueIdSlice = append(uniqueIdSlice, mapListReady.PushBack(MapTaskInformation{
+			Id:                   uniqueId,
 			OriginFileName:       fileName,
-			IntermediateFileName: "mr-" + strconv.Itoa(id+1) + "-",
-		})
+			IntermediateFileName: tempSlice,
+		}))
+		uniqueId += 1
 	}
 
-	reduceTaskSlice := []ReduceTaskInformation{}
+	// fmt.Println(uniqueIdSlice[0].Value)
 
+	// 获得map任务的数量
+	mapTaskNum := uniqueId
+
+	// Reduce节点数量，构建Reduce结构体并插入到双向链表中
 	for i := 0; i < nReduce; i++ {
-		reduceTaskSlice = append(reduceTaskSlice, ReduceTaskInformation{
-			Id:             i + 1,
-			State:          0,
-			OriginFileName: "mr-*-" + strconv.Itoa(i+1),
-			OutputFileName: "mr-out-" + strconv.Itoa(i+1),
-		})
+		uniqueIdSlice = append(uniqueIdSlice, reduceListReady.PushBack(ReduceTaskInformation{
+			Id:                   uniqueId,
+			IntermediateFileName: make([]string, 0),
+			OutputFileName:       "mr-out-" + strconv.Itoa(uniqueId),
+		}))
+		uniqueId += 1
 	}
 
+	// 构建 Coordinator
 	c := Coordinator{
-		MapTask:    mapTaskSlice,
-		ReduceTask: reduceTaskSlice,
+		WorkerNum:     -1,
+		UniqueIdSlice: uniqueIdSlice,
+		MapTaskNum:    mapTaskNum,
+		ReduceTaskNum: nReduce,
+		MapTask: MapTask{
+			MapListReady:    mapListReady,
+			MapListRunning:  mapListRunning,
+			MapListComplete: mapListComplete,
+		},
+		ReduceTask: ReduceTask{
+			ReduceListReady:    reduceListReady,
+			ReduceListRunning:  reduceListRunning,
+			ReduceListComplete: reduceListComplete,
+		},
 	}
 
-	// Your code here.
-
+	// 启动监听Worker的线程
 	c.server()
+
 	return &c
 }

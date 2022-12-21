@@ -11,27 +11,21 @@ import (
 	"strconv"
 )
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
-type ExampleArgs struct {
-	X int
+// Worker向Coordinator传递的信息
+type WorkerArgs struct {
+	Id       int    // Worker的唯一ID
+	Taskid   int    // 任务全局唯一ID
+	TaskType string // 任务类型
 }
 
-type ExampleReply struct {
-	Y int
-}
-
-// Add your RPC definitions here.
-
-type TaskInformation struct {
-	Id             int    // 任务id
-	TaskType       string // 任务类型
-	InputFileName  string // 输入文件名称
-	OutputFileName string // 输出文件名称
-	NReduce        int    // Reduce数量
+// Coordinator向Worker传递的信息
+type WorkerReply struct {
+	Id           int      // 任务id
+	TaskType     string   // 任务类型
+	MapInput     string   // Map任务的输入
+	MapOutput    []string // Map任务的输出
+	ReduceInput  []string // Reduce任务的输入
+	ReduceOutput string   // Reduce任务的输出
 }
 
 // Cook up a unique-ish UNIX-domain socket name

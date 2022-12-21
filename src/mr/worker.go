@@ -9,8 +9,6 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -20,10 +18,9 @@ type KeyValue struct {
 	Value string
 }
 
-// for sorting by key.
+// 实现排序接口
 type ByKey []KeyValue
 
-// for sorting by key.
 func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
@@ -36,35 +33,46 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-// main/mrworker.go calls this function.
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+// main/mrworker.go 调用的函数
+func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
+	// 1. 告知Coordinator自己已经上线
+	args := WorkerArgs{TaskType: "None"}
+	reply := WorkerReply{TaskType: "None"}
+	call("Coordinator.WorkerOnline", &args, &reply)
+
+	// 无限循环向Coordinator请求任务
 	for {
-		args := TaskInformation{}
-		reply := TaskInformation{TaskType: "None"}
+		// 2. 向Coordinator请求任务
+		args = WorkerArgs{TaskType: "None"}
+		reply = WorkerReply{TaskType: "None"}
 		ok := call("Coordinator.AsssignTask", &args, &reply)
+
 		if ok {
+
 			fmt.Println("Call Success!")
+
 			if reply.TaskType == "map" {
+
 				fmt.Printf("Map Task!\n")
+
+				// 读取文件，调用map函数进行处理
 				intermediate := []KeyValue{}
-				file, err := os.Open(reply.InputFileName)
+				file, err := os.Open(reply.MapInput)
 				if err != nil {
-					log.Fatalf("cannot open %v", reply.InputFileName)
+					log.Fatalf("cannot open %v", reply.MapInput)
 				}
 				content, err := io.ReadAll(file)
 				if err != nil {
-					log.Fatalf("cannot read %v", reply.InputFileName)
+					log.Fatalf("cannot read %v", reply.MapInput)
 				}
 				file.Close()
-				kva := mapf(reply.InputFileName, string(content))
+				kva := mapf(reply.MapInput, string(content))
 				intermediate = append(intermediate, kva...)
 
 				// 循环创建NReduce个文件准备保存
 				encoderList := make([]*json.Encoder, 0)
-				for i := 0; i < reply.NReduce; i++ {
-					fileName := reply.OutputFileName + strconv.FormatInt(int64(i+1), 10)
+				for _, fileName := range reply.MapOutput {
 					tempFile, err := os.Create(fileName)
 					if err != nil {
 						log.Fatalf("cannot create %v", fileName)
@@ -72,21 +80,27 @@ func Worker(mapf func(string, string) []KeyValue,
 					defer tempFile.Close()
 					encoderList = append(encoderList, json.NewEncoder(tempFile))
 				}
+				// 将map后的结果存入文件中（最费时间）
 				for i, v := range intermediate {
-					encoderList[ihash(v.Key)%reply.NReduce].Encode(&intermediate[i])
+					encoderList[ihash(v.Key)%len(reply.MapOutput)].Encode(&intermediate[i])
 				}
-				args = reply
+
+				// 3. 向Coordinator返回自己的Map任务已经完成
+				args.TaskType = "map"
+				args.Taskid = reply.Id
 				call("Coordinator.TaskFinish", &args, &reply)
 
 			} else if reply.TaskType == "reduce" {
 
-				ofile, _ := os.Create(reply.OutputFileName)
-
 				fmt.Printf("Reduce Task!\n")
+
+				// 创建输出文件
+				ofile, _ := os.Create(reply.ReduceOutput)
+
+				// 遍历输入文件，汇总Map产生的所有结果
 				kva := make([]KeyValue, 0)
-				for p := 1; p <= 8; p++ {
-					filename := strings.Replace(reply.InputFileName, "*", strconv.FormatInt(int64(p), 10), 1)
-					fmt.Println(filename)
+				for _, filename := range reply.ReduceInput {
+					// fmt.Println(filename)
 					file, err := os.Open(filename)
 					if err != nil {
 						log.Fatalf("cannot open %v", filename)
@@ -100,12 +114,11 @@ func Worker(mapf func(string, string) []KeyValue,
 						kva = append(kva, kv)
 					}
 				}
+
 				// 排序
 				sort.Sort(ByKey(kva))
-				//
-				// call Reduce on each distinct key in intermediate[],
-				// and print the result to mr-out-0.
-				//
+
+				// 在已经排好序的键值对上进行统计，并写入到文件中
 				i := 0
 				for i < len(kva) {
 					j := i + 1
@@ -118,20 +131,30 @@ func Worker(mapf func(string, string) []KeyValue,
 					}
 					output := reducef(kva[i].Key, values)
 
-					// this is the correct format for each line of Reduce output.
 					fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
 
 					i = j
 				}
-				args = reply
+
+				// 4. 向Coordinator返回自己的Reduce任务已经完成
+				args.Taskid = reply.Id
+				args.TaskType = "reduce"
 				call("Coordinator.TaskFinish", &args, &reply)
+
+			} else if reply.TaskType == "finish" {
+
+				// 5. 向Coordinator返回自己退出的消息
+				call("Coordinator.WorkerFinish", &args, &reply)
+				fmt.Printf("Bye!\n")
+				return
 			}
 		} else {
 			fmt.Printf("Call failed!\n")
 		}
+
+		// 间隔1秒请求一次
 		time.Sleep(time.Second)
 	}
-
 }
 
 // send an RPC request to the coordinator, wait for the response.
