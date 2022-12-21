@@ -33,18 +33,33 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func HeartBeat(timeStamp int64) {
+	for {
+		time.Sleep(time.Second * 9)
+		args := WorkerArgs{TimeStamp: timeStamp, TaskType: "None"}
+		reply := WorkerReply{TaskType: "None"}
+		call("Coordinator.WorkerAlive", &args, &reply)
+		fmt.Println("gogogo")
+	}
+}
+
 // main/mrworker.go 调用的函数
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 
+	// 时间戳
+	timeStamp := time.Now().UnixMicro()
+	go HeartBeat(timeStamp)
+	fmt.Println(timeStamp)
+
 	// 1. 告知Coordinator自己已经上线
-	args := WorkerArgs{TaskType: "None"}
+	args := WorkerArgs{TimeStamp: timeStamp, TaskType: "None"}
 	reply := WorkerReply{TaskType: "None"}
 	call("Coordinator.WorkerOnline", &args, &reply)
 
 	// 无限循环向Coordinator请求任务
 	for {
 		// 2. 向Coordinator请求任务
-		args = WorkerArgs{TaskType: "None"}
+		args = WorkerArgs{TimeStamp: timeStamp, TaskType: "None"}
 		reply = WorkerReply{TaskType: "None"}
 		ok := call("Coordinator.AsssignTask", &args, &reply)
 
@@ -89,6 +104,8 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				args.TaskType = "map"
 				args.Taskid = reply.Id
 				call("Coordinator.TaskFinish", &args, &reply)
+
+				fmt.Println(args.Taskid)
 
 			} else if reply.TaskType == "reduce" {
 
@@ -140,6 +157,8 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				args.Taskid = reply.Id
 				args.TaskType = "reduce"
 				call("Coordinator.TaskFinish", &args, &reply)
+
+				fmt.Println(args.Taskid)
 
 			} else if reply.TaskType == "finish" {
 

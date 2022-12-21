@@ -13,9 +13,9 @@ import (
 
 // Worker向Coordinator传递的信息
 type WorkerArgs struct {
-	Id       int    // Worker的唯一ID
-	Taskid   int    // 任务全局唯一ID
-	TaskType string // 任务类型
+	TimeStamp int64  // Worker的唯一时间戳
+	Taskid    int    // 任务全局唯一ID
+	TaskType  string // 任务类型
 }
 
 // Coordinator向Worker传递的信息

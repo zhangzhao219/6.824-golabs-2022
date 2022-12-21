@@ -2,6 +2,7 @@ package mr
 
 import (
 	"container/list"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Coordinator存储的主要信息，包括Map和Reduce两部分任务的信息以及工作节点的信息
@@ -17,7 +19,6 @@ type Coordinator struct {
 	UniqueIdSlice     []*list.Element // 通过任务Id找到任务信息的切片，相当于一个Map
 	MapTaskNum        int             // map任务总数量
 	ReduceTaskNum     int             // reduce任务总数量
-	WorkerNum         int             // 目前正在工作的节点数量
 	MapTask                           // Map任务信息链表
 	ReduceTask                        // Reduce任务信息链表
 	WorkerInformation                 // Worker的信息
@@ -25,6 +26,9 @@ type Coordinator struct {
 
 // 存储Worker的信息
 type WorkerInformation struct {
+	WorkerNum  int             // 目前正在工作的节点数量
+	WorkerMap  map[int64]int64 // 目前正在工作的节点时间信息
+	WorkerWork map[int64]int   // 节点最后一个执行的任务ID
 }
 
 // Map任务信息链表，包括三个链表，分别表示未开始、正在进行和已经完成的任务
@@ -65,7 +69,24 @@ func (c *Coordinator) WorkerOnline(args *WorkerArgs, reply *WorkerReply) error {
 		c.WorkerNum = 0
 	}
 	c.WorkerNum += 1
+	c.WorkerMap[args.TimeStamp] = args.TimeStamp
 	mu.Unlock()
+	return nil
+}
+
+// Worker告知Coordinator自己上线了
+func (c *Coordinator) WorkerAlive(args *WorkerArgs, reply *WorkerReply) error {
+
+	mu.Lock()
+
+	// 获取当前时间
+	timeNow := time.Now().UnixMicro()
+
+	// 给这个请求最新的时间戳
+	c.WorkerMap[args.TimeStamp] = timeNow
+
+	mu.Unlock()
+
 	return nil
 }
 
@@ -90,6 +111,7 @@ func (c *Coordinator) AsssignTask(args *WorkerArgs, reply *WorkerReply) error {
 
 			// 将一个未完成的任务从未开始的链表中取出，插入到正在进行的链表里面
 			e := c.MapListReady.Front()
+			fmt.Printf("%T,%v\n", e.Value, e.Value)
 			c.MapListReady.Remove(e)
 			c.MapListRunning.PushBack(e)
 
@@ -99,6 +121,9 @@ func (c *Coordinator) AsssignTask(args *WorkerArgs, reply *WorkerReply) error {
 			reply.Id = value.Id
 			reply.MapInput = value.OriginFileName
 			reply.MapOutput = value.IntermediateFileName
+
+			// 记录节点的最后一个工作
+			c.WorkerWork[args.TimeStamp] = value.Id
 		}
 	} else if c.ReduceListComplete.Len() != c.ReduceTaskNum {
 
@@ -112,6 +137,7 @@ func (c *Coordinator) AsssignTask(args *WorkerArgs, reply *WorkerReply) error {
 
 			// 将一个未完成的任务从未开始的链表中取出，插入到正在进行的链表里面
 			e := c.ReduceListReady.Front()
+			fmt.Printf("%T,%v\n", e.Value, e.Value)
 			c.ReduceListReady.Remove(e)
 			c.ReduceListRunning.PushBack(e)
 
@@ -122,6 +148,8 @@ func (c *Coordinator) AsssignTask(args *WorkerArgs, reply *WorkerReply) error {
 			reply.ReduceInput = value.IntermediateFileName
 			reply.ReduceOutput = value.OutputFileName
 
+			// 记录节点的最后一个工作
+			c.WorkerWork[args.TimeStamp] = value.Id
 		}
 	} else {
 
@@ -192,6 +220,7 @@ func (c *Coordinator) WorkerFinish(args *WorkerArgs, reply *WorkerReply) error {
 func (c *Coordinator) Done() bool {
 	ret := false
 	mu.Lock()
+	// fmt.Println(c.WorkerNum)
 	if c.WorkerNum == 0 {
 		ret = true
 	}
@@ -211,6 +240,50 @@ func (c *Coordinator) server() {
 		log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
+}
+
+// 判断Worker是否存活
+func (c *Coordinator) JudgeWorkerAlive() {
+
+	for {
+
+		time.Sleep(1 * time.Second)
+
+		mu.Lock()
+
+		// 获取当前时间
+		timeNow := time.Now().UnixMicro()
+
+		fmt.Println(c.WorkerMap)
+
+		// 遍历所有的Worker
+		for k, v := range c.WorkerMap {
+
+			// 如果发现Worker超时
+			if timeNow-v > 10*1000 {
+
+				// 获取WorkId和链表上的节点
+				workId := c.WorkerWork[k]
+				e2 := *(c.UniqueIdSlice[workId])
+
+				// 这里不太懂为什么要这样写
+				if workId < c.MapTaskNum {
+					c.MapListRunning.Remove(&e2)
+					c.MapListReady.PushBack(e2.Value)
+				} else {
+					c.ReduceListRunning.Remove(&e2)
+					c.ReduceListReady.PushBack(e2.Value)
+				}
+
+				delete(c.WorkerMap, k)
+				delete(c.WorkerWork, k)
+
+				c.WorkerNum -= 1
+			}
+		}
+		mu.Unlock()
+	}
+
 }
 
 // 创建一个 Coordinator
@@ -264,7 +337,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// 构建 Coordinator
 	c := Coordinator{
-		WorkerNum:     -1,
+		WorkerInformation: WorkerInformation{
+			WorkerNum:  -1,
+			WorkerMap:  make(map[int64]int64, 0),
+			WorkerWork: make(map[int64]int, 0),
+		},
 		UniqueIdSlice: uniqueIdSlice,
 		MapTaskNum:    mapTaskNum,
 		ReduceTaskNum: nReduce,
@@ -282,6 +359,5 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// 启动监听Worker的线程
 	c.server()
-
 	return &c
 }
