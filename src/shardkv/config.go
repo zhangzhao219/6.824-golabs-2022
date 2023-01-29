@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"6.824-golabs-2022/src/labrpc"
-	"6.824-golabs-2022/src/shardctrler"
+	"6.824/labrpc"
+	"6.824/shardctrler"
 
 	// import "log"
 	crand "crypto/rand"
@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"6.824-golabs-2022/src/raft"
+	"6.824/raft"
 )
 
 func randstring(n int) string {

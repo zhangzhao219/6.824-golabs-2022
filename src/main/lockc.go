@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	"6.824-golabs-2022/src/lockservice"
+	"6.824/lockservice"
 )
 
 func usage() {

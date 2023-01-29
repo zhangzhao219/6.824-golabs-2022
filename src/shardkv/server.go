@@ -3,9 +3,9 @@ package shardkv
 import (
 	"sync"
 
-	"6.824-golabs-2022/src/labgob"
-	"6.824-golabs-2022/src/labrpc"
-	"6.824-golabs-2022/src/raft"
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
 )
 
 type Op struct {

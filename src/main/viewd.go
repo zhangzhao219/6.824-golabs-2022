@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"6.824-golabs-2022/src/viewservice"
+	"6.824/viewservice"
 )
 
 func main() {

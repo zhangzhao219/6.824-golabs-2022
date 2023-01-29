@@ -16,7 +16,7 @@ import (
 	"os"
 	"time"
 
-	"6.824-golabs-2022/src/lockservice"
+	"6.824/lockservice"
 )
 
 func main() {

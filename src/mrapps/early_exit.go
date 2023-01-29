@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"6.824-golabs-2022/src/mr"
+	"6.824/mr"
 )
 
 // The map function is called once for each file of input.

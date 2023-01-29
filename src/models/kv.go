@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"6.824-golabs-2022/src/porcupine"
+	"6.824/porcupine"
 )
 
 type KvInput struct {

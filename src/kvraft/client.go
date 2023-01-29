@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"math/big"
 
-	"6.824-golabs-2022/src/labrpc"
+	"6.824/labrpc"
 )
 
 type Clerk struct {

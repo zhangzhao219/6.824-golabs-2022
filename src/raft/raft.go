@@ -22,8 +22,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	//	"6.824-golabs-2022/src/labgob"
-	"6.824-golabs-2022/src/labrpc"
+	//	"6.824/labgob"
+	"6.824/labrpc"
 )
 
 // as each Raft peer becomes aware that successive log entries are

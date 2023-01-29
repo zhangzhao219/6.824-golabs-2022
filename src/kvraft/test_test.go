@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"6.824-golabs-2022/src/models"
-	"6.824-golabs-2022/src/porcupine"
+	"6.824/models"
+	"6.824/porcupine"
 )
 
 // The tester generously allows solutions to complete elections in one second

@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"time"
 
-	"6.824-golabs-2022/src/diskv"
+	"6.824/diskv"
 )
 
 func usage() {

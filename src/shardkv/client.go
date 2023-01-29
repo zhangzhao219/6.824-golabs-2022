@@ -13,8 +13,8 @@ import (
 	"math/big"
 	"time"
 
-	"6.824-golabs-2022/src/labrpc"
-	"6.824-golabs-2022/src/shardctrler"
+	"6.824/labrpc"
+	"6.824/shardctrler"
 )
 
 // which shard is a key in?
