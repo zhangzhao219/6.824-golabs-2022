@@ -19,6 +19,7 @@ type Coordinator struct {
 	UniqueIdSlice     []*list.Element // 通过任务Id找到任务信息的切片，相当于一个Map
 	MapTaskNum        int             // map任务总数量
 	ReduceTaskNum     int             // reduce任务总数量
+	WorkerNum         int             // 目前正在工作的节点数量
 	MapTask                           // Map任务信息链表
 	ReduceTask                        // Reduce任务信息链表
 	WorkerInformation                 // Worker的信息
@@ -26,9 +27,6 @@ type Coordinator struct {
 
 // 存储Worker的信息
 type WorkerInformation struct {
-	WorkerNum  int             // 目前正在工作的节点数量
-	WorkerMap  map[int64]int64 // 目前正在工作的节点时间信息
-	WorkerWork map[int64]int   // 节点最后一个执行的任务ID
 }
 
 // Map任务信息链表，包括三个链表，分别表示未开始、正在进行和已经完成的任务
@@ -59,8 +57,23 @@ type ReduceTaskInformation struct {
 	OutputFileName       string   // Reduce任务完成后的最终文件名称
 }
 
+type HeartBeat struct {
+	WorkID int
+	Time   int64
+}
+
 // 全局互斥锁
 var mu sync.Mutex
+var WorkerList []HeartBeat
+
+// Coordinator接收心跳信号
+func (c *Coordinator) WorkerAlive(args *WorkerArgs, reply *WorkerReply) error {
+	mu.Lock()
+	WorkerList[args.Id-1].Time = time.Now().Unix()
+	fmt.Printf("接收到%d心跳信号\n", args.Id-1)
+	mu.Unlock()
+	return nil
+}
 
 // Worker告知Coordinator自己上线了
 func (c *Coordinator) WorkerOnline(args *WorkerArgs, reply *WorkerReply) error {
@@ -69,24 +82,13 @@ func (c *Coordinator) WorkerOnline(args *WorkerArgs, reply *WorkerReply) error {
 		c.WorkerNum = 0
 	}
 	c.WorkerNum += 1
-	c.WorkerMap[args.TimeStamp] = args.TimeStamp
+	// 分配任务ID并记录时间
+	WorkerList = append(WorkerList, HeartBeat{
+		WorkID: -1,
+		Time:   time.Now().Unix(),
+	})
+	reply.WorkerID = len(WorkerList)
 	mu.Unlock()
-	return nil
-}
-
-// Worker告知Coordinator自己上线了
-func (c *Coordinator) WorkerAlive(args *WorkerArgs, reply *WorkerReply) error {
-
-	mu.Lock()
-
-	// 获取当前时间
-	timeNow := time.Now().UnixMicro()
-
-	// 给这个请求最新的时间戳
-	c.WorkerMap[args.TimeStamp] = timeNow
-
-	mu.Unlock()
-
 	return nil
 }
 
@@ -111,7 +113,6 @@ func (c *Coordinator) AsssignTask(args *WorkerArgs, reply *WorkerReply) error {
 
 			// 将一个未完成的任务从未开始的链表中取出，插入到正在进行的链表里面
 			e := c.MapListReady.Front()
-			fmt.Printf("%T,%v\n", e.Value, e.Value)
 			c.MapListReady.Remove(e)
 			c.MapListRunning.PushBack(e)
 
@@ -121,9 +122,7 @@ func (c *Coordinator) AsssignTask(args *WorkerArgs, reply *WorkerReply) error {
 			reply.Id = value.Id
 			reply.MapInput = value.OriginFileName
 			reply.MapOutput = value.IntermediateFileName
-
-			// 记录节点的最后一个工作
-			c.WorkerWork[args.TimeStamp] = value.Id
+			WorkerList[args.Id-1].WorkID = value.Id
 		}
 	} else if c.ReduceListComplete.Len() != c.ReduceTaskNum {
 
@@ -137,7 +136,6 @@ func (c *Coordinator) AsssignTask(args *WorkerArgs, reply *WorkerReply) error {
 
 			// 将一个未完成的任务从未开始的链表中取出，插入到正在进行的链表里面
 			e := c.ReduceListReady.Front()
-			fmt.Printf("%T,%v\n", e.Value, e.Value)
 			c.ReduceListReady.Remove(e)
 			c.ReduceListRunning.PushBack(e)
 
@@ -147,9 +145,7 @@ func (c *Coordinator) AsssignTask(args *WorkerArgs, reply *WorkerReply) error {
 			reply.Id = value.Id
 			reply.ReduceInput = value.IntermediateFileName
 			reply.ReduceOutput = value.OutputFileName
-
-			// 记录节点的最后一个工作
-			c.WorkerWork[args.TimeStamp] = value.Id
+			WorkerList[args.Id-1].WorkID = value.Id
 		}
 	} else {
 
@@ -220,7 +216,6 @@ func (c *Coordinator) WorkerFinish(args *WorkerArgs, reply *WorkerReply) error {
 func (c *Coordinator) Done() bool {
 	ret := false
 	mu.Lock()
-	// fmt.Println(c.WorkerNum)
 	if c.WorkerNum == 0 {
 		ret = true
 	}
@@ -240,50 +235,6 @@ func (c *Coordinator) server() {
 		log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
-}
-
-// 判断Worker是否存活
-func (c *Coordinator) JudgeWorkerAlive() {
-
-	for {
-
-		time.Sleep(1 * time.Second)
-
-		mu.Lock()
-
-		// 获取当前时间
-		timeNow := time.Now().UnixMicro()
-
-		fmt.Println(c.WorkerMap)
-
-		// 遍历所有的Worker
-		for k, v := range c.WorkerMap {
-
-			// 如果发现Worker超时
-			if timeNow-v > 10*1000 {
-
-				// 获取WorkId和链表上的节点
-				workId := c.WorkerWork[k]
-				e2 := *(c.UniqueIdSlice[workId])
-
-				// 这里不太懂为什么要这样写
-				if workId < c.MapTaskNum {
-					c.MapListRunning.Remove(&e2)
-					c.MapListReady.PushBack(e2.Value)
-				} else {
-					c.ReduceListRunning.Remove(&e2)
-					c.ReduceListReady.PushBack(e2.Value)
-				}
-
-				delete(c.WorkerMap, k)
-				delete(c.WorkerWork, k)
-
-				c.WorkerNum -= 1
-			}
-		}
-		mu.Unlock()
-	}
-
 }
 
 // 创建一个 Coordinator
@@ -337,11 +288,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// 构建 Coordinator
 	c := Coordinator{
-		WorkerInformation: WorkerInformation{
-			WorkerNum:  -1,
-			WorkerMap:  make(map[int64]int64, 0),
-			WorkerWork: make(map[int64]int, 0),
-		},
+		WorkerNum:     -1,
 		UniqueIdSlice: uniqueIdSlice,
 		MapTaskNum:    mapTaskNum,
 		ReduceTaskNum: nReduce,
@@ -356,8 +303,37 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			ReduceListComplete: reduceListComplete,
 		},
 	}
+	// Worker信息存储
+	WorkerList = make([]HeartBeat, 0)
+	// 每间隔10秒进行验证
+	go func() {
+		for {
+			time.Sleep(10 * time.Second)
+			mu.Lock()
+			for i := 0; i < len(WorkerList); i++ {
+				if WorkerList[i].WorkID != -1 && time.Now().Unix()-WorkerList[i].Time > 10 {
+					fmt.Printf("%d心跳信号过期\n", i)
+					e2 := *(c.UniqueIdSlice[WorkerList[i].WorkID])
+
+					// 这里不太懂为什么要这样写
+					if WorkerList[i].WorkID < c.MapTaskNum {
+						c.MapListRunning.Remove(&e2)
+						c.MapListReady.PushBack(e2.Value)
+					} else {
+						c.ReduceListRunning.Remove(&e2)
+						c.ReduceListReady.PushBack(e2.Value)
+					}
+
+					c.WorkerNum -= 1
+					WorkerList[i].WorkID = -1
+				}
+			}
+			mu.Unlock()
+		}
+	}()
 
 	// 启动监听Worker的线程
 	c.server()
+
 	return &c
 }
