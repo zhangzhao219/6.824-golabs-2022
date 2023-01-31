@@ -19,10 +19,11 @@ package raft
 
 import (
 	//	"bytes"
+	"math/rand"
 	"sync"
-	"sync/atomic"
+	"time"
 
-	//	"6.824/labgob"
+	//	"6.824-golabs-2022/src/labgob"
 	"6.824/labrpc"
 )
 
@@ -35,40 +36,86 @@ import (
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
-type ApplyMsg struct {
-	CommandValid bool
-	Command      interface{}
-	CommandIndex int
 
-	// For 2D:
-	SnapshotValid bool
-	Snapshot      []byte
-	SnapshotTerm  int
-	SnapshotIndex int
+// The ticker go routine starts a new election if this peer hasn't received
+// heartsbeats recently.
+func (rf *Raft) leaderElection() {
+
+	lastElectTime := time.Now().Unix()
+
+	for !rf.killed() {
+
+		// Your code here to check if a leader election should
+		// be started and to randomize sleeping time using
+		// time.Sleep().
+
+		time.Sleep(time.Duration(rf.electTimeout+rand.Int63n(rf.randomTimeout)) * time.Millisecond)
+
+		rf.mu.Lock()
+		// lastStartTime := startTime
+
+		// 如果上一次循环到这里的实时时间比上一次接收到心跳包的时间还大，说明在睡眠时间内一直没有接收到心跳包，则认为超时
+		if lastElectTime > rf.lastReceive {
+			//DPrintf("[%d]: current state is [%s].", rf.me, rf.state)
+			if rf.state != Leader {
+				DPrintf("[%d]: is not leader, start election.", rf.me)
+				rf.tryLeader()
+			}
+		}
+		lastElectTime = time.Now().Unix() // 更新“上一次”的时间
+		rf.mu.Unlock()
+	}
 }
 
-// A Go object implementing a single Raft peer.
-type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+func (rf *Raft) tryLeader() {
+	rf.toCandidate()
 
-	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	votesSum := 1                // 总共的票的数量
+	votesGet := 1                // 收到的票数，自己首先给自己投票
+	cond := sync.NewCond(&rf.mu) // 条件变量，控制投票结果的返回
+	args := RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
+	}
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			go rf.requestVoteToPeer(i, &args, &votesSum, &votesGet, cond)
+		}
+	}
+	// 等待票数统计完毕并判断是否能成为Leader
+	go func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
 
+		for votesGet < rf.majorityVote && votesSum < len(rf.peers) && rf.state == Candidate {
+			cond.Wait()
+		}
+		if votesGet >= rf.majorityVote && rf.state == Candidate {
+			rf.toLeader()
+			// 发送心跳包
+			go rf.logReplication()
+		}
+	}()
 }
 
-// return currentTerm and whether this server
-// believes it is the leader.
-func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here (2A).
-	return term, isleader
+// Leader定时发送更新log的请求，同时也作为心跳包
+func (rf *Raft) logReplication() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.state == Leader {
+			args := AppendEntriesArgs{
+				Term:     rf.currentTerm,
+				LeaderId: rf.me,
+			}
+			for i := 0; i < len(rf.peers); i++ {
+				if i != rf.me {
+					go rf.appendEntriesToPeer(i, &args)
+				}
+			}
+		}
+		rf.mu.Unlock()
+		time.Sleep(time.Duration(rf.heartBeatTimeout) * time.Millisecond)
+	}
 }
 
 // save Raft's persistent state to stable storage,
@@ -123,55 +170,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-}
-
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-type RequestVoteReply struct {
-	// Your data here (2A).
-}
-
-// example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-}
-
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -194,37 +192,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-//
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
-func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
-}
-
-func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
-	return z == 1
-}
-
-// The ticker go routine starts a new election if this peer hasn't received
-// heartsbeats recently.
-func (rf *Raft) ticker() {
-	for rf.killed() == false {
-
-		// Your code here to check if a leader election should
-		// be started and to randomize sleeping time using
-		// time.Sleep().
-
-	}
-}
-
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -242,12 +209,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.toFollower(0)
 
+	rf.electTimeout = 200     // 初始化选举超时时间
+	rf.heartBeatTimeout = 100 // 初始化心跳间隔时间
+	rf.randomTimeout = 100    // 设置随机时间的最大范围
+
+	// 初始化成为Leader需要得到的票数
+	if len(rf.peers)%2 == 0 {
+		rf.majorityVote = len(rf.peers)/2 + 1
+	} else {
+		rf.majorityVote = (len(rf.peers) + 1) / 2
+	}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	go rf.ticker()
+	go rf.leaderElection()
 
 	return rf
 }
