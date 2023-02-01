@@ -45,13 +45,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.Term = rf.currentTerm // 注意这里任期号已经变化了，因此要重新赋值
 	DPrintf("[%d]: status: term [%d], state [%s], vote for [%d]", rf.me, rf.currentTerm, rf.state, rf.votedFor)
-	// 如果参数的任期号和我的相同，则任期号不变，需要通过日志确定是否投票给它
+	// 是否没投票或者投给的是这个candidate
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		// Todo：判断日志是否至少更新才可以投票
-		rf.votedFor = args.CandidateId
-		rf.lastReceive = time.Now().Unix() // 更新时间，上面操作相当于与可能的Leader通信过了
-		reply.VoteGranted = true
-		DPrintf("[%d]: voted to [%d]", rf.me, args.CandidateId)
+		// candidate的log是否至少和接受者的log一样新
+		// 1. 我的log长度为0，那我肯定投票给他了
+		// 2. candidate的最后的log的任期比我的最后的log的任期大
+		// 3. candidate的最后的log的任期和我的最后的log的任期相同，但是它的日志长度比我长
+		if len(rf.log) == 0 || (args.LastLogTerm > rf.log[len(rf.log)-1].Term) ||
+			(args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1) {
+			rf.votedFor = args.CandidateId
+			rf.lastReceive = time.Now().Unix() // 更新时间，上面操作相当于与可能的Leader通信过了
+			reply.VoteGranted = true
+			DPrintf("[%d]: voted to [%d]", rf.me, args.CandidateId)
+		}
 	}
 }
 

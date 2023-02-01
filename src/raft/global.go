@@ -32,6 +32,7 @@ type LogEntry struct {
 	Term    int         // 用户执行命令时候的任期号
 }
 
+// 由于论文中的索引是从1开始计算的，而计算机上切片的索引是从0开始算的，因此初始化为0的地方都要初始化为-1
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -58,7 +59,7 @@ type Raft struct {
 	// 在Leader上面的变化的状态
 	// 每一次选举后都要重新进行初始化
 	nextIndex  []int // 对于每⼀个服务器，需要发送给他的下⼀个日志条目的索引值（初始化为Leader最后索引值加1）
-	matchIndex []int // 对于每⼀个服务器，已经复制给他的日志的最高索引值
+	matchIndex []int // 对于每⼀个服务器，已经复制给他的日志的最高索引值（初始化为0）
 
 	// 与时间相关的变量
 	electTimeout     int64 // 选举超时时间
@@ -69,4 +70,8 @@ type Raft struct {
 	state        State // 当前Peer所处的状态（Leader、Candidate或Follower）
 	majorityVote int   // 成为Leader需要获得的最少票数
 	lastReceive  int64 // 最后一次接收到Leader的心跳信号的时间
+
+	applyCh   chan ApplyMsg
+	moreApply bool
+	applyCond *sync.Cond
 }

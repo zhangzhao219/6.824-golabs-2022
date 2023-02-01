@@ -73,9 +73,18 @@ func (rf *Raft) tryLeader() {
 	votesSum := 1                // 总共的票的数量
 	votesGet := 1                // 收到的票数，自己首先给自己投票
 	cond := sync.NewCond(&rf.mu) // 条件变量，控制投票结果的返回
+	// Candidate最后一条日志的信息
+	lastLogIndex := len(rf.log) - 1
+	lastLogTerm := -1
+	// 如果日志为空需要添加判断
+	if lastLogIndex != -1 {
+		lastLogTerm = rf.log[lastLogIndex].Term
+	}
 	args := RequestVoteArgs{
-		Term:        rf.currentTerm,
-		CandidateId: rf.me,
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
 	}
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
@@ -103,13 +112,9 @@ func (rf *Raft) logReplication() {
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state == Leader {
-			args := AppendEntriesArgs{
-				Term:     rf.currentTerm,
-				LeaderId: rf.me,
-			}
 			for i := 0; i < len(rf.peers); i++ {
 				if i != rf.me {
-					go rf.appendEntriesToPeer(i, &args)
+					go rf.appendEntriesToPeer(i)
 				}
 			}
 		}
@@ -170,28 +175,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
-// this function should return gracefully.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
-
-	return index, term, isLeader
-}
-
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -221,11 +204,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	} else {
 		rf.majorityVote = (len(rf.peers) + 1) / 2
 	}
+
+	// 初始化日志相关
+	rf.log = make([]LogEntry, 0)
+	rf.commitIndex = -1
+	rf.lastApplied = -1
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+
+	rf.applyCh = applyCh
+	rf.moreApply = false
+	rf.applyCond = sync.NewCond(&rf.mu)
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.leaderElection()
+
+	go rf.appMsgApplier()
 
 	return rf
 }
